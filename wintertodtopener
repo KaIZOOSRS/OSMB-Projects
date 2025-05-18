@@ -1,5 +1,4 @@
-package com.osmb.script.wintertodtopener;
-
+import com.osmb.api.item.ItemGroupResult;
 import com.osmb.api.location.position.types.WorldPosition;
 import com.osmb.api.scene.RSObject;
 import com.osmb.api.script.Script;
@@ -21,20 +20,39 @@ public class WintertodtLooter extends Script {
 
     public static final String[] BANK_NAMES = {"Bank chest"};
     public static final String[] BANK_ACTIONS = {"bank", "open"};
+    public static final Predicate<RSObject> BANK_QUERY = gameObject -> {
+        // if object has no name
+        if (gameObject.getName() == null) {
+            return false;
+        }
+        // has no interact options (eg. bank, open etc.)
+        if (gameObject.getActions() == null) {
+            return false;
+        }
+
+        if (!Arrays.stream(BANK_NAMES).anyMatch(name -> name.equalsIgnoreCase(gameObject.getName()))) {
+            return false;
+        }
+
+        // if no actions contain bank or open
+        if (!Arrays.stream(gameObject.getActions()).anyMatch(action -> Arrays.stream(BANK_ACTIONS).anyMatch(bankAction -> bankAction.equalsIgnoreCase(action)))) {
+            return false;
+        }
+        // final check is if the object is reachable
+        return gameObject.canReach();
+    };
     private static final Set<Integer> IGNORE_NOTHING = Collections.emptySet();
-    private boolean bank = false;
+    private ItemGroupResult inventorySnapshot;
 
     public WintertodtLooter(Object scriptCore) {
         super(scriptCore);
     }
 
 
-
     @Override
     public int[] regionsToPrioritise() {
         return new int[]{6461};
     }
-
 
 
     @Override
@@ -44,13 +62,13 @@ public class WintertodtLooter extends Script {
             return 0;
         }
 
-        Optional<Integer> freeSlots = getItemManager().getFreeSlotsInteger(getWidgetManager().getInventory());
-        if(!freeSlots.isPresent()) {
-            // for some reason we couldn't open the inventory, to be safe lets re-poll.
+        inventorySnapshot = getWidgetManager().getInventory().search(Collections.emptySet());
+        if (inventorySnapshot == null) {
+            log(WintertodtLooter.class, "Inventory not visible");
             return 0;
         }
 
-        if (freeSlots.get() == 0) {
+        if (inventorySnapshot.isFull()) {
             // if no free slots to co
             openBank();
             return 0;
@@ -75,37 +93,29 @@ public class WintertodtLooter extends Script {
         // we use human task, which on completion generates a human delay.
         // if we don't do this, the bot will INSTANTLY interact as the task returns true (inventory being full)
         submitHumanTask(() -> {
+            inventorySnapshot = getWidgetManager().getInventory().search(Collections.emptySet());
+            if (inventorySnapshot == null) {
+                log(WintertodtLooter.class, "Inventory not visible");
+                return false;
+            }
 
             DialogueType dialogueType = getWidgetManager().getDialogue().getDialogueType();
-            if(dialogueType == DialogueType.TAP_HERE_TO_CONTINUE) {
+            if (dialogueType == DialogueType.TAP_HERE_TO_CONTINUE) {
                 // check if correct dialogue
                 UIResult<String> dialogueTextResult = getWidgetManager().getDialogue().getText();
-                if(dialogueTextResult.isFound()) {
+                if (dialogueTextResult.isFound()) {
                     String dialogueText = dialogueTextResult.get();
-                    if(dialogueText.startsWith("There are no rewards")|| dialogueText.startsWith("You think")) {
+                    if (dialogueText.startsWith("There are no rewards") || dialogueText.startsWith("You think")) {
                         // no rewards dialogue, stop script
                         stop();
                         return true;
                     }
                 }
-            }
-            if (dialogueType != null) {
-                return true;
-            }
-
-
-            Optional<Integer> freeSlots_ = getItemManager().getFreeSlotsInteger(getWidgetManager().getInventory());
-            if (!freeSlots_.isPresent()) {
-                // if the returned Optional object is empty, it means that the inventory not visible
-                return false;
-            }
-            if (freeSlots_.get() == 0) {
-                // no free slots, so the inventory is full
-                // return true to break out of the task
+            } else if (dialogueType != null) {
                 return true;
             }
             // inventory is not full, so return false and poll the task again
-            return false;
+            return inventorySnapshot.isFull();
         }, random(TimeUnit.SECONDS.toMillis(60), TimeUnit.SECONDS.toMillis(90)));
         return 1000;
     }
@@ -113,36 +123,23 @@ public class WintertodtLooter extends Script {
     private void openBank() {
         log(getClass().getSimpleName(), "Searching for a bank...");
         // Find bank and open it
-        Predicate<RSObject> bankQuery = gameObject -> {
-            // if object has no name
-            if (gameObject.getName() == null) {
-                return false;
-            }
-            // has no interact options (eg. bank, open etc.)
-            if (gameObject.getActions() == null) {
-                return false;
-            }
-
-            if (!Arrays.stream(BANK_NAMES).anyMatch(name -> name.equalsIgnoreCase(gameObject.getName()))) {
-                return false;
-            }
-
-            // if no actions contain bank or open
-            if (!Arrays.stream(gameObject.getActions()).anyMatch(action -> Arrays.stream(BANK_ACTIONS).anyMatch(bankAction -> bankAction.equalsIgnoreCase(action)))) {
-                return false;
-            }
-            // final check is if the object is reachable
-            return gameObject.canReach();
-        };
-        List<RSObject> banksFound = getObjectManager().getObjects(bankQuery);
+        List<RSObject> banksFound = getObjectManager().getObjects(BANK_QUERY);
         //can't find a bank
         if (banksFound.isEmpty()) {
             log(getClass().getSimpleName(), "Can't find any banks matching criteria...");
             return;
         }
+        
         RSObject object = (RSObject) getUtils().getClosest(banksFound);
-        if (!object.interact(BANK_ACTIONS))
+        if (!object.interact(BANK_ACTIONS)) {
+            log(WintertodtLooter.class, "Failed to interact with bank.");
             return;
+        }
+        log(WintertodtLooter.class, "Successfully interacted with bank.");
+        waitForBankToOpen();
+    }
+
+    private void waitForBankToOpen() {
         AtomicReference<Timer> positionChangeTimer = new AtomicReference<>(new Timer());
         AtomicReference<WorldPosition> pos = new AtomicReference<>(null);
         // wait for bank interface
@@ -159,15 +156,11 @@ public class WintertodtLooter extends Script {
 
             return getWidgetManager().getBank().isVisible() || positionChangeTimer.get().timeElapsed() > 2000;
         }, 15000);
-        return;
     }
 
 
-
-
-
     private void handleBankInterface() {
-            if (!getWidgetManager().getBank().depositAll(IGNORE_NOTHING)) {
+        if (!getWidgetManager().getBank().depositAll(IGNORE_NOTHING)) {
             log(getClass().getSimpleName(), "Failed to deposit while bank is open.");
             return;
         }
